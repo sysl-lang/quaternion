@@ -1,0 +1,282 @@
+module sh.sysl.quaternion
+@tests
+
+import sysl.math.Float
+
+// What `sh.sysl.quaternion` computes, asserted in sysl.
+//
+// **The oracle values are numpy's**, computed by an independent route -- rotation matrices from
+// Rodrigues' formula, products from the 4×4 left-multiplication matrix, Euler angles as a product of
+// three axis matrices -- and hard-coded here with an explicit tolerance each. The rest are properties
+// that hold of any correct implementation, and the edge cases are the inputs where a plausible one
+// goes wrong: a half-turn, gimbal lock, two nearly equal rotations, and the narrower width.
+
+private const tol: real = 1e-12
+private const tol32: f32 = 1e-6
+
+private near3[F: Float](a: [3]F, b: [3]F, eps: F) -> bool =
+    (a[0] - b[0]).abs() <= eps && (a[1] - b[1]).abs() <= eps && (a[2] - b[2]).abs() <= eps
+
+private near33[F: Float](a: [3][3]F, b: [3][3]F, eps: F) -> bool =
+    near3(a[0], b[0], eps) && near3(a[1], b[1], eps) && near3(a[2], b[2], eps)
+
+private mat_vec[F: Float](m: [3][3]F, v: [3]F) -> [3]F = [
+    m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+    m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+    m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2]]
+
+private all_nan[F: Float](q: Quaternion[F]) -> bool =
+    q.w.is_nan() && q.x.is_nan() && q.y.is_nan() && q.z.is_nan()
+
+private const half_pi: real = 1.5707963267948966
+
+// -- the algebra ---------------------------------------------------------------------------------------
+
+@test("the Hamilton product against numpy, in both orders")
+hamilton_product()
+    val p = Quaternion(1.0, 2.0, 3.0, 4.0)
+    val q = Quaternion(5.0, 6.0, 7.0, 8.0)
+
+    assert_eq(p * q, Quaternion(-60.0, 12.0, 30.0, 24.0), "p q")
+    assert_eq(q * p, Quaternion(-60.0, 20.0, 14.0, 32.0), "q p, which differs: it does not commute")
+    assert(p * q != q * p, "the product is not commutative in general")
+
+@test("i j is k and j i is -k")
+units_anticommute()
+    val i = Quaternion(0.0, 1.0, 0.0, 0.0)
+    val j = Quaternion(0.0, 0.0, 1.0, 0.0)
+    val k = Quaternion(0.0, 0.0, 0.0, 1.0)
+
+    assert_eq(i * j, k, "i j = k")
+    assert_eq(j * i, -k, "j i = -k")
+    val one: Quaternion[real] = Quaternion.identity()
+
+    assert_eq(i * i, -one, "i² = -1")
+
+@test("addition, subtraction, negation and scaling from either side")
+linear_operations()
+    val p = Quaternion(1.0, 2.0, 3.0, 4.0)
+    val q = Quaternion(0.5, -1.0, 2.0, 0.0)
+
+    assert_eq(p + q, Quaternion(1.5, 1.0, 5.0, 4.0), "sum")
+    assert_eq(p - q, Quaternion(0.5, 3.0, 1.0, 4.0), "difference")
+    assert_eq(-p, Quaternion(-1.0, -2.0, -3.0, -4.0), "negation")
+    assert_eq(p * 2.0, Quaternion(2.0, 4.0, 6.0, 8.0), "scaled on the right")
+    assert_eq(2.0 * p, p * 2.0, "and on the left, the same")
+    assert_eq(2.0f32 * Quaternion(1.0f32, 0.0, 0.0, 1.0), Quaternion(2.0f32, 0.0, 0.0, 2.0), "f32 too")
+
+@test("conjugate, dot and norm")
+conjugate_dot_norm()
+    val p = Quaternion(1.0, 2.0, 3.0, 4.0)
+
+    assert_eq(p.conjugate(), Quaternion(1.0, -2.0, -3.0, -4.0), "the vector part negated")
+    assert_eq(p.dot(Quaternion(5.0, 6.0, 7.0, 8.0)), 70.0, "5 + 12 + 21 + 32")
+    assert_eq(p.norm_squared(), 30.0, "1 + 4 + 9 + 16")
+    assert((p.norm() - 30.0.sqrt()).abs() <= tol, "the norm is its root")
+    assert((p.normalize().norm() - 1.0).abs() <= tol, "normalize lands on the unit sphere")
+
+@test("q times its inverse is one, unit or not")
+inverse_is_inverse()
+    val p = Quaternion(1.0, 2.0, 3.0, 4.0)
+
+    assert((p * p.inverse()).near(Quaternion.identity(), tol), "on the right")
+    assert((p.inverse() * p).near(Quaternion.identity(), tol), "and on the left")
+
+    val u = Quaternion.from_axis_angle([1.0, 2.0, 3.0], 0.7)
+
+    assert(u.inverse().near(u.conjugate(), tol), "a unit quaternion's inverse is its conjugate")
+
+@test("the norm is multiplicative")
+norm_is_multiplicative()
+    val p = Quaternion(1.0, 2.0, 3.0, 4.0)
+    val q = Quaternion(5.0, -6.0, 7.0, 0.5)
+
+    assert(((p * q).norm() - p.norm() * q.norm()).abs() <= 1e-12 * p.norm() * q.norm(), "|pq| = |p||q|")
+
+
+// -- the error paths -----------------------------------------------------------------------------------
+
+@test("the zero quaternion has no inverse and no direction: NaN in all four parts")
+zero_quaternion()
+    val z = Quaternion(0.0, 0.0, 0.0, 0.0)
+
+    assert(all_nan(z.normalize()), "normalize")
+    assert(all_nan(z.inverse()), "inverse")
+    assert(all_nan(Quaternion(0.0f32, 0.0, 0.0, 0.0).normalize()), "at f32 as well")
+
+@test("an axis need not be a unit vector, and a zero axis is NaN")
+axis_is_normalized()
+    val unit = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.9)
+
+    assert(Quaternion.from_axis_angle([0.0, 0.0, 5.0], 0.9).near(unit, 1e-15), "length 5, same rotation")
+    assert(Quaternion.from_axis_angle([0.0, 0.0, 1e-3], 0.9).near(unit, 1e-15), "length 0.001 too")
+    assert(all_nan(Quaternion.from_axis_angle([0.0, 0.0, 0.0], 0.9)), "the zero axis names no rotation")
+
+// -- rotation ------------------------------------------------------------------------------------------
+
+@test("axis-angle, matrix and rotation against numpy")
+rotation_against_numpy()
+    val q = Quaternion.from_axis_angle([1.0, 2.0, 3.0], 0.7)
+    val m: [3][3]real = [
+        [0.781639173907025, -0.4829292842142122, 0.3947397981737998],
+        [0.5501172307043584, 0.8320301337746346, -0.07139249941787587],
+        [-0.29395787843858057, 0.27295633888831433, 0.9160150668873173]]
+
+    assert(q.near(Quaternion(0.9393727128473789, 0.0916432938695913, 0.1832865877391826,
+        0.2749298816087739), tol), "the quaternion")
+    assert(near33(q.to_matrix(), m, tol), "its matrix")
+    assert(near3(q.rotate([1.0, -2.0, 0.5]), [1.9448676414223494, -1.149639286553849,
+        -0.3818630227715506], tol), "a vector rotated")
+    assert(near3(q.rotate([1.0, -2.0, 0.5]), mat_vec(m, [1.0, -2.0, 0.5]), tol), "rotate is the matrix")
+
+@test("rotation at f32 against the same oracle")
+rotation_at_f32()
+    val axis: [3]f32 = [1.0, 2.0, 3.0]
+    val v: [3]f32 = [1.0, -2.0, 0.5]
+    val q = Quaternion.from_axis_angle(axis, 0.7f32)
+
+    assert(q.near(Quaternion(0.93937271f32, 0.09164329, 0.18328659, 0.27492988), tol32), "the quaternion")
+    assert(near3(q.rotate(v), [1.9448676f32, -1.1496393, -0.38186302], 4.0 * tol32), "a vector rotated")
+    assert(near3(q.rotate(v), mat_vec(q.to_matrix(), v), 4.0 * tol32), "rotate is the matrix")
+
+@test("the zero rotation is the identity and moves nothing")
+zero_rotation()
+    val q = Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.0)
+    val (yaw, pitch, roll) = q.to_euler()
+
+    assert_eq(q, Quaternion.identity(), "exactly")
+    assert_eq(q.rotate([3.0, -4.0, 5.0]), [3.0, -4.0, 5.0], "a vector is unmoved")
+    assert_eq(Quaternion.from_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), q, "from I")
+    assert(yaw == 0.0 && pitch == 0.0 && roll == 0.0, "all three angles zero")
+
+@test("q and -q are the same rotation")
+negation_is_the_same_rotation()
+    val q = Quaternion.from_axis_angle([1.0, 2.0, 3.0], 0.7)
+    val v = [1.0, -2.0, 0.5]
+
+    assert(near3(q.rotate(v), (-q).rotate(v), tol), "they rotate a vector alike")
+    assert(near33(q.to_matrix(), (-q).to_matrix(), tol), "and have one matrix")
+    assert(q.same_rotation(-q, tol) && !q.near(-q, tol), "same rotation, different quaternion")
+
+@test("composition: p q rotates by q and then by p")
+composition_order()
+    val p = Quaternion.from_axis_angle([0.0, 0.0, 1.0], half_pi)
+    val q = Quaternion.from_axis_angle([1.0, 0.0, 0.0], half_pi)
+    val v = [0.0, 1.0, 0.0]
+
+    assert(near3((p * q).rotate(v), p.rotate(q.rotate(v)), tol), "q first, then p")
+    assert(near3((p * q).rotate(v), [0.0, 0.0, 1.0], tol), "y about x to z, z about z stays")
+    assert(near3((q * p).rotate(v), [-1.0, 0.0, 0.0], tol), "the other order: y about z to -x, which x keeps")
+
+@test("matrix to quaternion to matrix round-trips through every Shepperd branch")
+matrix_round_trips()
+    // The trace branch, then a half-turn about each axis (trace -1, w = 0: each diagonal branch), and
+    // a half-turn about a diagonal axis.
+    val axes: [5][3]real = [[1.0, 2.0, 3.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0]]
+    val angles: [5]real = [0.7, 3.141592653589793, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+
+    for i in 0..<5
+        val q = Quaternion.from_axis_angle(axes[i], angles[i])
+        val back = Quaternion.from_matrix(q.to_matrix())
+
+        assert(back.same_rotation(q, tol), "the quaternion is recovered up to sign")
+        assert(near33(back.to_matrix(), q.to_matrix(), tol), "the matrix round-trips")
+
+@test("a half-turn's matrix from numpy gives its quaternion")
+half_turn_from_matrix()
+    val m: [3][3]real = [
+        [2.220446049250313e-16, 0.9999999999999998, 8.659560562354932e-17],
+        [0.9999999999999998, 2.220446049250313e-16, -8.659560562354932e-17],
+        [-8.659560562354932e-17, 8.659560562354932e-17, -0.9999999999999996]]
+    val q = Quaternion.from_matrix(m)
+    val r = 0.7071067811865476
+
+    assert(q.same_rotation(Quaternion(0.0, r, r, 0.0), tol), "w = 0, axis (1, 1, 0)/√2")
+    assert((q.norm() - 1.0).abs() <= tol, "and unit")
+
+// -- Euler angles --------------------------------------------------------------------------------------
+
+@test("Euler angles, intrinsic ZYX, against numpy and back")
+euler_round_trip()
+    val q = Quaternion.from_euler(0.3, -0.4, 1.1)
+    val (yaw, pitch, roll) = q.to_euler()
+
+    assert(q.near(Quaternion(0.8106307378338158, 0.531826470777482, -0.09091621275834293,
+        0.22753605014821532), tol), "the quaternion is Rz(yaw) Ry(pitch) Rx(roll)")
+    assert(near3(q.to_matrix()[0], [0.879923176281257, -0.46559872956632825, 0.09462043579124363], tol),
+        "its matrix's first row")
+    assert((yaw - 0.3).abs() <= tol && (pitch + 0.4).abs() <= tol && (roll - 1.1).abs() <= tol, "back")
+
+@test("gimbal lock at pitch +90° and -90°: roll is zero and yaw carries the rest")
+gimbal_lock()
+    val (y1, p1, r1) = Quaternion.from_euler(0.5, half_pi, 0.2).to_euler()
+    val (y2, p2, r2) = Quaternion.from_euler(0.5, -half_pi, 0.2).to_euler()
+
+    assert(p1 == half_pi && r1 == 0.0, "pitch exactly +π/2, roll exactly 0")
+    assert((y1 - 0.3).abs() <= 1e-7, "yaw - roll is what is determined at +90°")
+    assert(p2 == -half_pi && r2 == 0.0, "pitch exactly -π/2, roll exactly 0")
+    assert((y2 - 0.7).abs() <= 1e-7, "yaw + roll at -90°")
+    assert(Quaternion.from_euler(y1, p1, r1).same_rotation(Quaternion.from_euler(0.5, half_pi, 0.2), 1e-7),
+        "and the angles given back name the same rotation")
+
+@test("gimbal lock at f32")
+gimbal_lock_f32()
+    val (yaw, pitch, roll) = Quaternion.from_euler(0.5f32, f32(half_pi), 0.2).to_euler()
+
+    assert(pitch == f32(half_pi) && roll == 0.0, "pitch ±π/2 and roll zero at the narrower width")
+    assert((yaw - 0.3).abs() <= 1e-3, "yaw - roll")
+
+// -- interpolation and integration ---------------------------------------------------------------------
+
+@test("SLERP against numpy, with its endpoints and its norm")
+slerp_values()
+    val a = Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.2)
+    val b = Quaternion.from_axis_angle([0.0, 1.0, 1.0], 1.3)
+
+    assert_eq(slerp(a, b, 0.0), a, "t = 0 is a, exactly")
+    assert(slerp(a, b, 1.0).near(b, tol), "t = 1 is b")
+    assert(slerp(a, b, 0.3).near(Quaternion(0.9783099510458351, 0.07255010639654448, 0.1371971605875028,
+        0.1371971605875028), tol), "t = 0.3")
+    assert(slerp(a, b, 0.5).near(Quaternion(0.9460628444480796, 0.052732578204621856, 0.2260358041889626,
+        0.2260358041889626), tol), "the midpoint is the normalized sum")
+
+    for i in 0..10
+        assert((slerp(a, b, real(i) / 10.0).norm() - 1.0).abs() <= tol, "unit at every tenth of the way")
+
+@test("SLERP takes the short path when the signs are opposite")
+slerp_short_path()
+    val a = Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.2)
+    val b = Quaternion.from_axis_angle([0.0, 1.0, 1.0], 1.3)
+
+    assert(slerp(a, -b, 0.3).same_rotation(slerp(a, b, 0.3), tol), "-b interpolates as b does")
+    assert(slerp(a, -b, 1.0).near(b, tol), "it arrives at b's sign, the near one")
+
+@test("SLERP between nearly equal rotations falls back to a normalized lerp")
+slerp_nearly_equal()
+    val a = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.0)
+    val b = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.0001)
+    val mid = slerp(a, b, 0.5)
+
+    assert(!mid.w.is_nan(), "no division by a vanishing sine")
+    assert(mid.near(Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.00005), 1e-10), "the midpoint")
+    assert_eq(slerp(a, a, 0.5), a, "a rotation with itself is itself")
+
+@test("integrating a constant body rate is the axis-angle rotation, against numpy")
+integration()
+    val omega = [0.1, -0.2, 0.3]
+    var q: Quaternion[real] = Quaternion.identity()
+
+    for _ in 0..<100 do q = q.integrate(omega, 0.01)
+
+    assert(q.near(Quaternion(0.9825509821552589, 0.04970884332485948, -0.09941768664971896,
+        0.14912652997457843), 1e-12), "one second at a constant rate")
+    assert_eq(q.integrate([0.0, 0.0, 0.0], 0.01), q, "a zero rate changes nothing")
+
+@test("integration at f32 stays on the unit sphere over many steps")
+integration_f32()
+    val omega: [3]f32 = [1.5, -0.7, 2.2]
+    var q: Quaternion[f32] = Quaternion.identity()
+
+    for _ in 0..<10000 do q = q.integrate(omega, 0.001)
+
+    assert((q.norm() - 1.0).abs() <= tol32, "renormalized at every step")

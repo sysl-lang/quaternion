@@ -1,0 +1,24 @@
+// Quaternions for sysl: 3D rotation at `real` and at `f32`, from one body per operation.
+//
+// The element type is bounded by `sysl.math.Float`, which supplies every function a rotation needs
+// (sqrt, abs, sin, cos, acos, atan2, epsilon, an ordering) at both widths, so nothing here is written
+// twice and nothing here is a private copy of a trait the standard library already has.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       quaternion { git = "github.com/sysl-lang/quaternion", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `quaternion`; the module a program imports is
+// `sh.sysl.quaternion`. It declares no dependencies of its own.
+
+package {
+  name    = "quaternion"
+  version = "0.1.0"
+  sysl    = "0.1.0-alpha.11"
+}
+
+// Nothing here allocates: a quaternion is four floats by value, a vector is a `[3]F` and a rotation
+// matrix a `[3][3]F`, all passed and returned by value. That is what lets the same code run on a
+// Cortex-M with no heap, where an IMU filter integrates a gyroscope reading every sample.

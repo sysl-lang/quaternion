@@ -1,0 +1,297 @@
+module sh.sysl.quaternion
+@no_alloc
+
+import sysl.math.Float
+
+/** A quaternion `w + xi + yj + zk`, at any floating-point width `sysl.math.Float` covers.
+ *
+ * **The bound is the standard library's `Float` and nothing narrower or wider.** Every function a
+ * rotation needs -- `sqrt`, `abs`, `sin`, `cos`, `acos`, `atan2`, an epsilon, an ordering -- is a member
+ * of it, so each operation here is one body that runs at `real` and at `f32` alike. A constant that is
+ * neither zero nor one is a conversion through the parameter, `F(0.5)`, resolved at each width.
+ *
+ * A **unit** quaternion is a rotation, and `q` and `-q` are the same one. The arithmetic below is the
+ * whole algebra, unit or not; the rotation routines in `rotation.sysl` assume a unit quaternion and
+ * say so.
+ */
+struct Quaternion[F: Float]
+    w: F
+    x: F
+    y: F
+    z: F
+
+    /** The identity rotation, `1 + 0i + 0j + 0k`. */
+    identity() -> Quaternion[F] = Quaternion(F.one(), F.zero(), F.zero(), F.zero())
+
+    /** All four parts NaN: the answer to a question that has none, such as the axis of nothing. */
+    nan() -> Quaternion[F] = Quaternion(F.nan(), F.nan(), F.nan(), F.nan())
+
+    /** The rotation by `angle` radians about `axis`, right-handed.
+     *
+     * **The axis need not be a unit vector**: it is normalized here, so `[0, 0, 5]` and `[0, 0, 1]`
+     * name the same rotation and give the same quaternion. A zero axis names no direction, and the
+     * answer is `nan()` in all four parts -- the same answer `normalize` gives for the zero quaternion.
+     */
+    from_axis_angle(axis: [3]F, angle: F) -> Quaternion[F]
+        val n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt()
+
+        if n == F.zero() then return Quaternion.nan()
+
+        val half = angle * F(0.5)
+        val s = half.sin() / n
+
+        Quaternion(half.cos(), axis[0] * s, axis[1] * s, axis[2] * s)
+    end from_axis_angle
+
+    /** The real part's partner: the same quaternion with the vector part negated. For a unit
+     * quaternion it is the inverse, and it is the cheap way to undo a rotation.
+     */
+    conjugate(self) -> Quaternion[F] = Quaternion(self.w, -self.x, -self.y, -self.z)
+
+    /** The four-dimensional dot product. Its absolute value is the cosine of half the angle between
+     * two rotations, which is what `slerp` measures.
+     */
+    dot(self, rhs: Quaternion[F]) -> F =
+        self.w * rhs.w + self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+
+    /** The squared length, `w² + x² + y² + z²`: the norm without its root. */
+    norm_squared(self) -> F = self.dot(self)
+
+    /** The length. It is multiplicative: `|pq| = |p||q|`, which is why a product of unit quaternions
+     * stays a rotation.
+     */
+    norm(self) -> F = self.norm_squared().sqrt()
+
+    /** The unit quaternion in the same direction. **The zero quaternion has none, and the answer is
+     * NaN in all four parts**, which is the division saying so -- exactly as `Complex.unit` answers at
+     * zero in `sysl.math.complex`. A NaN is chosen over an `Option` for that reason: it is what the
+     * standard library's own arithmetic does for the same case, and a filter loop that normalizes every
+     * sample should not pay for a branch the hardware already reports.
+     */
+    normalize(self) -> Quaternion[F] = self * (F.one() / self.norm())
+
+    /** The multiplicative inverse, `conjugate / |q|²`, so that `q * q.inverse()` is the identity. The
+     * zero quaternion has none and answers NaN in all four parts, as `normalize` does.
+     */
+    inverse(self) -> Quaternion[F] = self.conjugate() * (F.one() / self.norm_squared())
+
+    /** Whether every part is within `tol` of the other's. This is equality of quaternions, not of
+     * rotations: `q.near(-q, tol)` is false. `same_rotation` is the one that identifies them.
+     */
+    near(self, rhs: Quaternion[F], tol: F) -> bool =
+        (self.w - rhs.w).abs() <= tol && (self.x - rhs.x).abs() <= tol &&
+            (self.y - rhs.y).abs() <= tol && (self.z - rhs.z).abs() <= tol
+
+    /** Whether the two describe the same rotation to within `tol` per part: `q` and `-q` do. */
+    same_rotation(self, rhs: Quaternion[F], tol: F) -> bool = self.near(rhs, tol) || self.near(-rhs, tol)
+
+    // --- What a unit quaternion is for: rotating vectors, and the conversions between it and the
+    // other two ways a program writes a rotation down. Vectors are `[3]F` and matrices `[3][3]F`,
+    // row-major, so nothing here depends on a vector package. **Each of these assumes a unit
+    // quaternion**; `normalize` first when the value came from arithmetic that may have drifted. ---
+
+    /** `v` rotated by this quaternion: `q v q*`, computed without forming either product,
+     * as `v + w t + u × t` where `u` is the vector part and `t = 2 u × v`.
+     */
+    rotate(self, v: [3]F) -> [3]F
+        val two = F(2)
+        val t: [3]F = [
+            two * (self.y * v[2] - self.z * v[1]),
+            two * (self.z * v[0] - self.x * v[2]),
+            two * (self.x * v[1] - self.y * v[0])]
+
+        [
+            v[0] + self.w * t[0] + (self.y * t[2] - self.z * t[1]),
+            v[1] + self.w * t[1] + (self.z * t[0] - self.x * t[2]),
+            v[2] + self.w * t[2] + (self.x * t[1] - self.y * t[0])]
+    end rotate
+
+    /** The rotation matrix, row-major: `to_matrix()` times a column vector is `rotate` of it. */
+    to_matrix(self) -> [3][3]F
+        val one = F.one()
+        val two = F(2)
+        val (w, x, y, z) = (self.w, self.x, self.y, self.z)
+
+        [
+            [one - two * (y * y + z * z), two * (x * y - w * z), two * (x * z + w * y)],
+            [two * (x * y + w * z), one - two * (x * x + z * z), two * (y * z - w * x)],
+            [two * (x * z - w * y), two * (y * z + w * x), one - two * (x * x + y * y)]]
+    end to_matrix
+
+    /** The unit quaternion of a rotation matrix (Shepperd's method).
+     *
+     * **The branch is chosen by the largest of the trace and the three diagonal entries**, so the
+     * square root is always taken of a number at least one and the divisions by it are well
+     * conditioned. The trace alone fails exactly where it matters: at a rotation of 180° the trace is
+     * -1, `w` is zero, and dividing by it is a division by zero. The sign of the answer is whatever
+     * the branch gives; `q` and `-q` are the same rotation.
+     */
+    from_matrix(m: [3][3]F) -> Quaternion[F]
+        val one = F.one()
+        val two = F(2)
+        val quarter = F(0.25)
+        val trace = m[0][0] + m[1][1] + m[2][2]
+
+        if trace > F.zero()
+            val s = (trace + one).sqrt() * two
+
+            return Quaternion(quarter * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s,
+                (m[1][0] - m[0][1]) / s)
+
+        if m[0][0] > m[1][1] && m[0][0] > m[2][2]
+            val s = (one + m[0][0] - m[1][1] - m[2][2]).sqrt() * two
+
+            return Quaternion((m[2][1] - m[1][2]) / s, quarter * s, (m[0][1] + m[1][0]) / s,
+                (m[0][2] + m[2][0]) / s)
+
+        if m[1][1] > m[2][2]
+            val s = (one + m[1][1] - m[0][0] - m[2][2]).sqrt() * two
+
+            return Quaternion((m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, quarter * s,
+                (m[1][2] + m[2][1]) / s)
+
+        val s = (one + m[2][2] - m[0][0] - m[1][1]).sqrt() * two
+
+        Quaternion((m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s,
+            quarter * s)
+    end from_matrix
+
+    /** The rotation of Euler angles in radians, **intrinsic Z-Y'-X''** -- yaw about z, then pitch
+     * about the new y, then roll about the newest x -- which is the aerospace convention and the one
+     * an IMU reports. As a product it is `yaw(z) * pitch(y) * roll(x)`.
+     */
+    from_euler(yaw: F, pitch: F, roll: F) -> Quaternion[F]
+        val half = F(0.5)
+        val (cy, sy) = ((yaw * half).cos(), (yaw * half).sin())
+        val (cp, sp) = ((pitch * half).cos(), (pitch * half).sin())
+        val (cr, sr) = ((roll * half).cos(), (roll * half).sin())
+
+        Quaternion(
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy)
+    end from_euler
+
+    /** The Euler angles `(yaw, pitch, roll)` of this rotation, in the convention `from_euler` takes.
+     *
+     * **At pitch ±90° (gimbal lock) yaw and roll turn about the same axis**, and only their difference
+     * (at +90°) or sum (at -90°) is determined. There the answer puts all of it in yaw and returns a
+     * roll of exactly zero and a pitch of exactly ±π/2, rather than splitting it arbitrarily or letting
+     * `asin` of a value rounded past one return NaN. The lock is detected within a few epsilons of the
+     * pole, at whichever width `F` is.
+     */
+    to_euler(self) -> (F, F, F)
+        val one = F.one()
+        val two = F(2)
+        val (w, x, y, z) = (self.w, self.x, self.y, self.z)
+        val sin_pitch = two * (w * y - z * x)
+
+        if sin_pitch.abs() >= one - F(8) * F.epsilon()
+            val yaw = (-two * (x * y - w * z)).atan2(one - two * (x * x + z * z))
+
+            return (yaw, (F.pi() * F(0.5)).copysign(sin_pitch), F.zero())
+
+        val yaw = (two * (w * z + x * y)).atan2(one - two * (y * y + z * z))
+        val roll = (two * (w * x + y * z)).atan2(one - two * (x * x + y * y))
+
+        (yaw, sin_pitch.asin(), roll)
+    end to_euler
+
+    /** The integration of a body-frame angular velocity `omega` (radians per second about x, y and
+     * z) over `dt` seconds: the step an IMU filter takes once per gyroscope sample.
+     *
+     * The rotation over the step is taken exactly, as the axis-angle `omega / |omega|` by
+     * `|omega| dt`, and composed on the right because the rate is measured in the body's own frame.
+     * The result is renormalized, so a long run of steps does not drift off the unit sphere. A zero
+     * rate leaves the orientation as it was.
+     */
+    integrate(self, omega: [3]F, dt: F) -> Quaternion[F]
+        val rate = (omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]).sqrt()
+
+        if rate == F.zero() then return self
+
+        (self * Quaternion.from_axis_angle(omega, rate * dt)).normalize()
+    end integrate
+
+impl[F: Float] Eq for Quaternion[F]
+    eq(self, rhs: Quaternion[F]) -> bool =
+        self.w == rhs.w && self.x == rhs.x && self.y == rhs.y && self.z == rhs.z
+
+impl[F: Float] Add for Quaternion[F]
+    add(self, rhs: Quaternion[F]) -> Quaternion[F] =
+        Quaternion(self.w + rhs.w, self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+
+impl[F: Float] Sub for Quaternion[F]
+    sub(self, rhs: Quaternion[F]) -> Quaternion[F] =
+        Quaternion(self.w - rhs.w, self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+
+impl[F: Float] Neg for Quaternion[F]
+    neg(self) -> Quaternion[F] = Quaternion(-self.w, -self.x, -self.y, -self.z)
+
+/** The Hamilton product. **It does not commute**: `i * j` is `k` and `j * i` is `-k`, and composing
+ * two rotations in the other order is a different rotation. `p * q` applied to a vector rotates by
+ * `q` first and then by `p`.
+ */
+impl[F: Float] Mul for Quaternion[F]
+    mul(self, rhs: Quaternion[F]) -> Quaternion[F]
+        val a = self
+        val b = rhs
+
+        Quaternion(
+            a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+            a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+            a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w)
+    end mul
+
+/** Scaling by a number on the right, `q * k`. */
+impl[F: Float] Mul[F] for Quaternion[F]
+    mul(self, k: F) -> Quaternion[F] = Quaternion(self.w * k, self.x * k, self.y * k, self.z * k)
+
+/** The number on the left, `k * q`, which is where a page of mathematics writes it. A real scalar
+ * commutes with every quaternion, so it is the right-hand form. One block per width, because the
+ * subject of each is the element and an `impl` may not be written for a bare type parameter.
+ */
+impl Mul[Quaternion[real], Quaternion[real]] for real
+    mul(self, q: Quaternion[real]) -> Quaternion[real] = q * self
+
+impl Mul[Quaternion[f32], Quaternion[f32]] for f32
+    mul(self, q: Quaternion[f32]) -> Quaternion[f32] = q * self
+
+private render_quaternion[F: Float + Display](q: Quaternion[F], out: *Writer, parts: FormatSpec)
+    q.w.display(out, parts)
+    render_part(q.x, "i", out, parts)
+    render_part(q.y, "j", out, parts)
+    render_part(q.z, "k", out, parts)
+
+private render_part[F: Float + Display](c: F, unit: string, out: *Writer, parts: FormatSpec)
+    val negative = c < F.zero()
+
+    out.write(if negative then "-".bytes else "+".bytes)
+    (if negative then -c else c).display(out, parts)
+    out.write(unit.bytes)
+
+/** `w+xi+yj+zk`, with each sign written out and never a `+-` -- the way `Complex` writes `a+bi`. The
+ * field applies to the whole value, so a width pads the quaternion once rather than each part.
+ */
+impl[F: Float + Display] Display for Quaternion[F]
+    display(self, out: *Writer, fmt: FormatSpec)
+        val parts = FormatSpec(0, fmt.prec, false)
+        var pad = 0
+
+        if fmt.width > 0
+            var count = Counting(0)
+            var sink: *Writer = &count
+
+            render_quaternion(self, sink, parts)
+            pad = fmt.width - int(count.n)
+
+            if pad < 0 then pad = 0
+
+        if !fmt.left then display_fill(out, 32, pad)
+
+        render_quaternion(self, out, parts)
+
+        if fmt.left then display_fill(out, 32, pad)
+    end display

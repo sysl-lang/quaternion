@@ -1,0 +1,32 @@
+module sh.sysl.quaternion
+@no_alloc
+
+import sysl.math.Float
+
+/** Spherical linear interpolation from `a` (at `t = 0`) to `b` (at `t = 1`), at constant angular
+ * speed along the great arc between them.
+ *
+ * **It takes the short path**: `b` and `-b` are one rotation, and when the two are more than a
+ * half-turn apart in the four-dimensional sense (`a · b < 0`) the other sign is used, so the
+ * interpolation never goes the long way round. **When the two are nearly equal** (`|a · b| > 0.9995`)
+ * the arc's `sin θ` is close to zero and dividing by it loses the answer, so it falls back to
+ * normalized linear interpolation, which agrees with the arc to well inside the tolerance there.
+ */
+slerp[F: Float](a: Quaternion[F], b: Quaternion[F], t: F) -> Quaternion[F]
+    var to = b
+    var d = a.dot(b)
+
+    if d < F.zero()
+        to = -b
+        d = -d
+
+    if d > F(0.9995) then return (a + (to - a) * t).normalize()
+
+    val theta0 = d.acos()
+    val theta = theta0 * t
+    val sin0 = theta0.sin()
+    val s0 = theta.cos() - d * theta.sin() / sin0
+    val s1 = theta.sin() / sin0
+
+    a * s0 + to * s1
+end slerp
