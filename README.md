@@ -8,7 +8,7 @@ sh/sysl/quaternion/
     quaternion.sysl  the type, its algebra, and rotation: vectors, matrices, Euler angles, integration
     slerp.sysl       spherical linear interpolation, short path and near-equal fallback
     tests.sysl       what all of it claims, against numpy, run by `sysl test .`
-package.hocon        who this package is, and what it needs of the machine
+sysl.hocon           who this package is, and what it needs of the machine
 ```
 
 The module is **`sh.sysl.quaternion`**. It depends on nothing outside the standard library.

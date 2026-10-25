@@ -16,7 +16,7 @@
 package {
   name    = "quaternion"
   version = "0.1.0"
-  sysl    = "0.1.0-alpha.11"
+  sysl    = "0.6.0"
 }
 
 // Nothing here allocates: a quaternion is four floats by value, a vector is a `[3]F` and a rotation
